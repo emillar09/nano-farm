@@ -33,25 +33,15 @@ static const PROGMEM u1_t NWKSKEY[16] = {0x2A, 0x89, 0x02, 0x50, 0x84, 0x2F, 0xD
 static const PROGMEM u1_t APPSKEY[16] = {0x6D, 0x2E, 0x8E, 0xE7, 0x02, 0xB9, 0x2B, 0xF5, 0x7E, 0x69, 0x06, 0xD6, 0x59, 0x45, 0xE5, 0x70 };
 static const PROGMEM u4_t DEVADDR = 0x2601122C;
 
-unsigned long entry = millis();
-
 #define LED 13
 // Schedule TX every this many seconds (might become longer due to duty
 // cycle limitations).
 #define TX_INTERVAL 3600
 #define MOISTURE_SENSOR_PIN A3
 
-// These callbacks are only used in over-the-air activation, so they are
-// left empty here (we cannot leave them out completely unless
-// DISABLE_JOIN is set in config.h, otherwise the linker will complain).
-void os_getArtEui (u1_t* buf) { }
-void os_getDevEui (u1_t* buf) { }
-void os_getDevKey (u1_t* buf) { }
-
 // Just set value globally until sensor code added
 int moistureReading = 0;
 static osjob_t sendjob;
-bool switchState = true, oldSwitchState = false;
 
 // Pin mapping
 const lmic_pinmap lmic_pins = {
@@ -95,18 +85,19 @@ void onEvent (ev_t ev)
 
 void do_send(osjob_t* j)
 {
-   byte buffer[32];
-   moistureReading = analogRead(MOISTURE_SENSOR_PIN);
+   byte payload[2];
+   int moistureReading = analogRead(MOISTURE_SENSOR_PIN);
+   payload[0] = highByte(moistureReading);
+   payload[1] = lowByte(moistureReading);
    // Check if there is not a current TX/RX job running
    if (LMIC.opmode & OP_TXRXPEND)
    {
       Serial.println(F("OP_TXRXPEND, not sending"));
    } else {
       // Prepare upstream data transmission at the next possible time.
-      String message = String(moistureReading);
-      message.getBytes(buffer, message.length() + 1);
-      Serial.println("Sending: " + message);
-      LMIC_setTxData2(1, (uint8_t*) buffer, message.length() , 0);
+      Serial.print(F("Sending: " ));
+      Serial.println(moistureReading, HEX);
+      LMIC_setTxData2(1, (uint8_t*) payload, 2 , 0);
       Serial.println(F(" Packet queued"));
       digitalWrite(LED, HIGH);
    }
