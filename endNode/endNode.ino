@@ -37,11 +37,17 @@ static const PROGMEM u4_t DEVADDR = 0x2601122C;
 // Schedule TX every this many seconds (might become longer due to duty
 // cycle limitations).
 #define TX_INTERVAL 3600
-#define MOISTURE_SENSOR_PIN A3
+#define SENSOR_INTERVAL 900
+#define MOISTURE_SENSOR_PIN A0
 #define AIR_VALUE 590
 #define WATER_VALUE 74
 
 static osjob_t sendjob;
+static osjob_t sensorjob;
+
+const int numReadings = TX_INTERVAL / SENSOR_INTERVAL;
+byte moistureReadings[numReadings] = {};
+int index = 0;
 
 // Pin mapping
 const lmic_pinmap lmic_pins = {
@@ -62,6 +68,8 @@ void onEvent (ev_t ev)
          Serial.println(LMIC.dataLen);
          // Schedule next transmission
          os_setTimedCallback(&sendjob, os_getTime() + sec2osticks(TX_INTERVAL), do_send);
+         index = 0;
+         os_setTimedCallback(&sensorjob, os_getTime() + sec2osticks(SENSOR_INTERVAL), read_sensor);
          digitalWrite(LED, LOW);
          break;
       case EV_RESET:
@@ -83,20 +91,37 @@ void onEvent (ev_t ev)
    }
 }
 
+void read_sensor(osjob_t* j)
+{
+   int moistureReading = analogRead(MOISTURE_SENSOR_PIN);
+   // map readings to percentage scale
+   moistureReadings[index] = map(moistureReading, WATER_VALUE, AIR_VALUE, 100, 0);
+   Serial.print(index);
+   Serial.print(": ");
+   Serial.println(moistureReadings[index]);
+   index ++;
+   if (index != numReadings - 1)
+   {
+     os_setTimedCallback(&sensorjob, os_getTime() + sec2osticks(SENSOR_INTERVAL), read_sensor);
+   }
+}
+
 void do_send(osjob_t* j)
 {
    int moistureReading = analogRead(MOISTURE_SENSOR_PIN);
    // map readings to percentage scale
-   byte moisturePercentage = map(moistureReading, WATER_VALUE, AIR_VALUE, 100, 0);
+   moistureReadings[index] = map(moistureReading, WATER_VALUE, AIR_VALUE, 100, 0);
+   Serial.print(index);
+   Serial.print(": ");
+   Serial.println(moistureReadings[index]);
    // Check if there is not a current TX/RX job running
    if (LMIC.opmode & OP_TXRXPEND)
    {
       Serial.println(F("OP_TXRXPEND, not sending"));
    } else {
       // Prepare upstream data transmission at the next possible time.
-      Serial.print(F("Sending: " ));
-      Serial.println(moistureReading, HEX);
-      LMIC_setTxData2(1, (uint8_t*) moisturePercentage, 1 , 0);
+      Serial.print(F("Sending packet: " ));
+      LMIC_setTxData2(1, (uint8_t*) moistureReadings, numReadings, 0);
       Serial.println(F(" Packet queued"));
       digitalWrite(LED, HIGH);
    }
