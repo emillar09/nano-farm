@@ -38,9 +38,9 @@ static const PROGMEM u4_t DEVADDR = 0x2601122C;
 // cycle limitations).
 #define TX_INTERVAL 3600
 #define MOISTURE_SENSOR_PIN A3
+#define AIR_VALUE 590
+#define WATER_VALUE 74
 
-// Just set value globally until sensor code added
-int moistureReading = 0;
 static osjob_t sendjob;
 
 // Pin mapping
@@ -85,10 +85,9 @@ void onEvent (ev_t ev)
 
 void do_send(osjob_t* j)
 {
-   byte payload[2];
    int moistureReading = analogRead(MOISTURE_SENSOR_PIN);
-   payload[0] = highByte(moistureReading);
-   payload[1] = lowByte(moistureReading);
+   // map readings to percentage scale
+   byte moisturePercentage = map(moistureReading, WATER_VALUE, AIR_VALUE, 100, 0);
    // Check if there is not a current TX/RX job running
    if (LMIC.opmode & OP_TXRXPEND)
    {
@@ -97,7 +96,7 @@ void do_send(osjob_t* j)
       // Prepare upstream data transmission at the next possible time.
       Serial.print(F("Sending: " ));
       Serial.println(moistureReading, HEX);
-      LMIC_setTxData2(1, (uint8_t*) payload, 2 , 0);
+      LMIC_setTxData2(1, (uint8_t*) moisturePercentage, 1 , 0);
       Serial.println(F(" Packet queued"));
       digitalWrite(LED, HIGH);
    }
