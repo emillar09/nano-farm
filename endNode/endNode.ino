@@ -39,8 +39,11 @@ static const PROGMEM u4_t DEVADDR = 0x2601122C;
 #define TX_INTERVAL 3600
 #define SENSOR_INTERVAL 900
 #define MOISTURE_SENSOR_PIN A0
+#define PUMP_PIN 4
 #define AIR_VALUE 590
 #define WATER_VALUE 74
+//just guessed this to have a test
+#define WATERING_THRESHOLD 50
 
 static osjob_t sendjob;
 static osjob_t sensorjob;
@@ -114,6 +117,14 @@ void do_send(osjob_t* j)
    Serial.print(index);
    Serial.print(": ");
    Serial.println(moistureReadings[index]);
+   if (moistureReadings[index] <= WATERING_THRESHOLD)
+   {
+     Serial.println("Water Pump on");
+     digitalWrite(PUMP_PIN, LOW);
+     delay(2000);
+     Serial.println("Water Pump off");
+     digitalWrite(PUMP_PIN, HIGH);
+   }
    // Check if there is not a current TX/RX job running
    if (LMIC.opmode & OP_TXRXPEND)
    {
@@ -134,9 +145,13 @@ void setup() {
    Serial.print(F("\nSending data to Gateway every: "));
    Serial.print(TX_INTERVAL);
    Serial.println(F(" seconds"));
+   //Allow for AVR timing error
+   LMIC_setClockError(MAX_CLOCK_ERROR * 5 / 100);
 
    pinMode(LED, OUTPUT);
    digitalWrite(LED, LOW);
+
+   pinMode(PUMP_PIN, OUTPUT);
 
    // LMIC init
    os_init();
