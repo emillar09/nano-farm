@@ -1,193 +1,154 @@
-/*******************************************************************************
-  Copyright (c) 2015 Thomas Telkamp and Matthijs Kooijman
-  Permission is hereby granted, free of charge, to anyone
-  obtaining a copy of this document and accompanying files,
-  to do whatever they want with them without any restriction,
-  including, but not limited to, copying, modification and redistribution.
-  NO WARRANTY OF ANY KIND IS PROVIDED.
-  This example sends a valid LoRaWAN packet with payload "Hello,
-  world!", using frequency and encryption settings matching those of
-  the The Things Network.
-  This uses ABP (Activation-by-personalisation), where a DevAddr and
-  Session keys are preconfigured (unlike OTAA, where a DevEUI and
-  application key is configured, while the DevAddr and session keys are
-  assigned/generated in the over-the-air-activation procedure).
-Note: LoRaWAN per sub-band duty-cycle limitation is enforced (1% in
-g1, 0.1% in g2), but not the TTN fair usage policy (which is probably
-violated by this sketch when left running for longer)!
-To use this sketch, first register your application and device with
-the things network, to set or generate a DevAddr, NwkSKey and
-AppSKey. Each device should have their own unique values for these
-fields.
-Do not forget to define the radio type correctly in config.h.
-                                                               *******************************************************************************/
+// Arduino Code for End Node of Nano Farm
+// Based on examples from https://github.com/matthijskooijman/arduino-lmic
+// and https://github.com/gonzalocasas/arduino-uno-dragino-lorawan/
 
 #include <lmic.h>
 #include <hal/hal.h>
-#include <SPI.h>
+#include "LowPower.h"
 
-// LoRaWAN NwkSKey, network session key
-// This is the default Semtech key, which is used by the early prototype TTN network.
+/*************************************
+ * NwkSKey: network session key, AppSKey: application session key, and DevAddr: end-device address
+ *************************************/
+static const u1_t NWKSKEY[16] = { 0x06, 0x23, 0x25, 0xEF, 0x59, 0xED, 0xD9, 0xBA, 0xAD, 0xC9, 0xF8, 0x0B, 0x0F, 0x10, 0x68, 0x17 };
+static const u1_t APPSKEY[16] = { 0x3A, 0x98, 0x2D, 0x70, 0xED, 0xB3, 0xDE, 0x24, 0xC7, 0xA9, 0x62, 0x49, 0x23, 0x87, 0x94, 0x8F };
+static const u4_t DEVADDR = 0x26011A21;
 
-static const PROGMEM u1_t NWKSKEY[16] = {0x2A, 0x89, 0x02, 0x50, 0x84, 0x2F, 0xDB, 0xEE, 0x13, 0x6E, 0x82, 0x8E, 0xD7, 0xAD, 0x5C, 0x53 };
-static const PROGMEM u1_t APPSKEY[16] = {0x6D, 0x2E, 0x8E, 0xE7, 0x02, 0xB9, 0x2B, 0xF5, 0x7E, 0x69, 0x06, 0xD6, 0x59, 0x45, 0xE5, 0x70 };
-static const PROGMEM u4_t DEVADDR = 0x2601122C;
-
-#define LED 13
-// Schedule TX every this many seconds (might become longer due to duty
-// cycle limitations).
-#define TX_INTERVAL 3600
-#define SENSOR_INTERVAL 900
 #define MOISTURE_SENSOR_PIN A0
 #define PUMP_PIN 4
+
 #define AIR_VALUE 590
 #define WATER_VALUE 74
-//just guessed this to have a test
-#define WATERING_THRESHOLD 50
+#define WATERING_THRESHOLD 50 // Just guessed this to have a test
+#define NUM_READINGS 3
 
-static osjob_t sendjob;
-static osjob_t sensorjob;
-
-const int numReadings = TX_INTERVAL / SENSOR_INTERVAL;
-byte moistureReadings[numReadings] = {};
-int index = 0;
+volatile bool waitToSend;
 
 // Pin mapping
 const lmic_pinmap lmic_pins = {
-   .nss = 10,
-   .rxtx = LMIC_UNUSED_PIN,
-   .rst = 9,
-   .dio = {2, 6, 7},
+    .nss = 10,
+    .rxtx = LMIC_UNUSED_PIN,
+    .rst = 9,
+    .dio = {2, 6, 7},
 };
 
 void onEvent (ev_t ev)
 {
-   Serial.print(os_getTime());
-   Serial.print(": ");
-   switch (ev)
-   {
-      case EV_TXCOMPLETE:
-         Serial.println(F("EV_TXCOMPLETE"));
-         Serial.println(LMIC.dataLen);
-         // Schedule next transmission
-         os_setTimedCallback(&sendjob, os_getTime() + sec2osticks(TX_INTERVAL), do_send);
-         index = 0;
-         os_setTimedCallback(&sensorjob, os_getTime() + sec2osticks(SENSOR_INTERVAL), read_sensor);
-         digitalWrite(LED, LOW);
-         break;
-      case EV_RESET:
-         Serial.println(F("EV_RESET"));
-         break;
-      case EV_RXCOMPLETE:
-         // data received in ping slot
-         Serial.println(F("EV_RXCOMPLETE"));
-         break;
-      case EV_LINK_DEAD:
-         Serial.println(F("EV_LINK_DEAD"));
-         break;
-      case EV_LINK_ALIVE:
-         Serial.println(F("EV_LINK_ALIVE"));
-         break;
-      default:
-         Serial.println(F("Unknown event"));
-         break;
-   }
+    if (ev == EV_TXCOMPLETE)
+    {
+        Serial.println(F("EV_TXCOMPLETE (includes waiting for RX windows)"));
+        if (LMIC.dataLen) {
+          uint8_t downlink[LMIC.dataLen];
+          memcpy(&downlink,&(LMIC.frame+LMIC.dataBeg)[0],LMIC.dataLen);
+          Serial.println(F("Got Message"));
+          Serial.println(downlink[0], HEX);
+        }
+        // Tell main program to continue
+        waitToSend = false;
+    }
 }
 
-void read_sensor(osjob_t* j)
+void setup()
 {
-   int moistureReading = analogRead(MOISTURE_SENSOR_PIN);
-   // map readings to percentage scale
-   moistureReadings[index] = map(moistureReading, WATER_VALUE, AIR_VALUE, 100, 0);
-   Serial.print(index);
-   Serial.print(": ");
-   Serial.println(moistureReadings[index]);
-   index ++;
-   if (index != numReadings - 1)
-   {
-     os_setTimedCallback(&sensorjob, os_getTime() + sec2osticks(SENSOR_INTERVAL), read_sensor);
-   }
+    Serial.begin(115200);
+    Serial.println(F("Setting Up Nano Farm End Node"));
+
+    pinMode(PUMP_PIN, OUTPUT);
+
+    //Allow for AVR timing error
+    LMIC_setClockError(MAX_CLOCK_ERROR * 5 / 100);
+
+    // LMIC init
+    os_init();
+
+    // Reset the MAC state. Session and pending data transfers will be discarded.
+    LMIC_reset();
+
+    // Set static session parameters.
+    LMIC_setSession (0x1, DEVADDR, NWKSKEY, APPSKEY);
+
+    // Only enable channel 0 so always picked up by single-channel gateway
+    Serial.println("European Channels");
+    for (int i = 1; i <= 8; i++) LMIC_disableChannel(i);
+
+    // Disable link check validation
+    LMIC_setLinkCheckMode(0);
+
+    // TTN uses SF9 for its RX2 window.
+    LMIC.dn2Dr = DR_SF9;
+
+    // Set data rate and transmit power for uplink (note: txpow seems to be ignored by the library)
+    LMIC_setDrTxpow(DR_SF7,14);
+
 }
 
-void do_send(osjob_t* j)
+byte readFromMoistureSensor()
 {
-   int moistureReading = analogRead(MOISTURE_SENSOR_PIN);
-   // map readings to percentage scale
-   moistureReadings[index] = map(moistureReading, WATER_VALUE, AIR_VALUE, 100, 0);
-   Serial.print(index);
-   Serial.print(": ");
-   Serial.println(moistureReadings[index]);
-   if (moistureReadings[index] <= WATERING_THRESHOLD)
-   {
-     Serial.println("Water Pump on");
-     digitalWrite(PUMP_PIN, LOW);
-     delay(2000);
-     Serial.println("Water Pump off");
-     digitalWrite(PUMP_PIN, HIGH);
-   }
-   // Check if there is not a current TX/RX job running
-   if (LMIC.opmode & OP_TXRXPEND)
-   {
-      Serial.println(F("OP_TXRXPEND, not sending"));
-   } else {
-      // Prepare upstream data transmission at the next possible time.
-      Serial.print(F("Sending packet: " ));
-      LMIC_setTxData2(1, (uint8_t*) moistureReadings, numReadings, 0);
-      Serial.println(F(" Packet queued"));
-      digitalWrite(LED, HIGH);
-   }
-   // Next TX is scheduled after TX_COMPLETE event.
+    int moistureReading = analogRead(MOISTURE_SENSOR_PIN);
+    // map readings to percentage scale
+    byte val = map(moistureReading, WATER_VALUE, AIR_VALUE, 100, 0);
+
+    return val;
 }
 
-void setup() {
-   Serial.begin(115200);
-   Serial.println(F("Setting Up Nano Farm End Node"));
-   Serial.print(F("\nSending data to Gateway every: "));
-   Serial.print(TX_INTERVAL);
-   Serial.println(F(" seconds"));
-   //Allow for AVR timing error
-   LMIC_setClockError(MAX_CLOCK_ERROR * 5 / 100);
-
-   pinMode(LED, OUTPUT);
-   digitalWrite(LED, LOW);
-
-   pinMode(PUMP_PIN, OUTPUT);
-
-   // LMIC init
-   os_init();
-   // Reset the MAC state. Session and pending data transfers will be discarded.
-   LMIC_reset();
-
-   // Set static session parameters. Instead of dynamically establishing a session
-   // by joining the network, precomputed session parameters are be provided.
-   // On AVR, these values are stored in flash and only copied to RAM
-   // once. Copy them to a temporary buffer here, LMIC_setSession will
-   // copy them into a buffer of its own again.
-   uint8_t appskey[sizeof(APPSKEY)];
-   uint8_t nwkskey[sizeof(NWKSKEY)];
-   memcpy_P(appskey, APPSKEY, sizeof(APPSKEY));
-   memcpy_P(nwkskey, NWKSKEY, sizeof(NWKSKEY));
-   LMIC_setSession (0x1, DEVADDR, nwkskey, appskey);
-
-   Serial.println("European Channels");
-   for (int i = 1; i <= 8; i++) LMIC_disableChannel(i);
-
-   // Disable link check validation
-   LMIC_setLinkCheckMode(0);
-
-   // TTN uses SF9 for its RX2 window.
-   LMIC.dn2Dr = DR_SF9;
-
-   // Set data rate and transmit power for uplink (note: txpow seems to be ignored by the library)
-   Serial.println("SF7");
-   LMIC_setDrTxpow(DR_SF7, 14);
-
-   // Start job
-   do_send(&sendjob);
+void waterPlants(byte reading)
+{
+    if (reading <= WATERING_THRESHOLD)
+    {
+        Serial.println("Water Pump on");
+        digitalWrite(PUMP_PIN, LOW);
+        delay(2000);
+        Serial.println("Water Pump off");
+        digitalWrite(PUMP_PIN, HIGH);
+    }
 }
 
-void loop() {
-   os_runloop_once();
+bool sendToServer(byte * data, int dataLength)
+{
+    // Check if there is not a current TX/RX job running
+    if (LMIC.opmode & OP_TXRXPEND) {
+        Serial.println(F("OP_TXRXPEND, not sending"));
+        return false;
+    } else {
+        // Prepare upstream data transmission at the next possible time.
+        Serial.print(F("Sending packet: " ));
+        LMIC_setTxData2(1, (uint8_t*) data, dataLength, 0);
+        Serial.println(F(" Packet queued"));
+        return true;
+    }
+}
 
+void sleepFor10Mins ()
+{
+    for (int i=0; i<75; i++)
+    {
+        LowPower.powerDown(SLEEP_8S, ADC_OFF, BOD_ON);
+    }
+}
+
+void loop()
+{
+    byte moistureReadings[NUM_READINGS] = {};
+
+    sleepFor10Mins(); // 10 mins
+    moistureReadings[0] = readFromMoistureSensor();
+    Serial.print("0 : ");
+    Serial.println(moistureReadings[0]);
+    sleepFor10Mins(); // 20 mins
+    moistureReadings[1] = readFromMoistureSensor();
+    Serial.print("1 : ");
+    Serial.println(moistureReadings[1]);
+    sleepFor10Mins(); // 30 mins
+    waterPlants(moistureReadings[1]);
+    sleepFor10Mins(); // 40 mins
+    moistureReadings[2] = readFromMoistureSensor();
+    Serial.print("2 : ");
+    Serial.println(moistureReadings[2]);
+    sleepFor10Mins(); // 50 mins
+    sleepFor10Mins(); // 60 mins
+    waitToSend = sendToServer(moistureReadings, sizeof(moistureReadings));
+    while (waitToSend)
+    {
+        os_runloop_once();
+    }
 }
 
