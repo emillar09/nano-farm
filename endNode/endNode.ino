@@ -14,14 +14,19 @@ static const u1_t APPSKEY[16] = { 0x3A, 0x98, 0x2D, 0x70, 0xED, 0xB3, 0xDE, 0x24
 static const u4_t DEVADDR = 0x26011A21;
 
 #define MOISTURE_SENSOR_PIN A0
-#define PUMP_PIN 4
+#define WATER_PUMP_PIN 4
+#define FEED_PUMP_PIN 5
 
 #define AIR_VALUE 590
 #define WATER_VALUE 74
+
 #define WATERING_THRESHOLD 50 // Just guessed this to have a test
+#define WATER_TIME 2000
+#define FEED_TIME 2000
 #define NUM_READINGS 3
 
 volatile bool waitToSend;
+int hourCounter;
 
 // Pin mapping
 const lmic_pinmap lmic_pins = {
@@ -52,7 +57,11 @@ void setup()
     Serial.begin(115200);
     Serial.println(F("Setting Up Nano Farm End Node"));
 
-    pinMode(PUMP_PIN, OUTPUT);
+    pinMode(WATER_PUMP_PIN, OUTPUT);
+    pinMode(FEED_PUMP_PIN, OUTPUT);
+    digitalWrite(FEED_PUMP_PIN, HIGH);
+    digitalWrite(WATER_PUMP_PIN, HIGH);
+    hourCounter = 0;
 
     //Allow for AVR timing error
     LMIC_setClockError(MAX_CLOCK_ERROR * 5 / 100);
@@ -90,15 +99,29 @@ byte readFromMoistureSensor()
     return val;
 }
 
+void feedPlants()
+{
+    // Feed plants once a week
+    if (hourCounter == 168) // 168 hours = 7 days
+    {
+        Serial.println("Feed Pump on");
+        digitalWrite(FEED_PUMP_PIN, LOW);
+        delay(FEED_TIME);
+        Serial.println("Feed Pump off");
+        digitalWrite(FEED_PUMP_PIN, HIGH);
+        hourCounter = 0;
+    }
+}
+
 void waterPlants(byte reading)
 {
     if (reading <= WATERING_THRESHOLD)
     {
         Serial.println("Water Pump on");
-        digitalWrite(PUMP_PIN, LOW);
-        delay(2000);
+        digitalWrite(WATER_PUMP_PIN, LOW);
+        delay(WATER_TIME);
         Serial.println("Water Pump off");
-        digitalWrite(PUMP_PIN, HIGH);
+        digitalWrite(WATER_PUMP_PIN, HIGH);
     }
 }
 
@@ -144,11 +167,13 @@ void loop()
     Serial.print("2 : ");
     Serial.println(moistureReadings[2]);
     sleepFor10Mins(); // 50 mins
+    feedPlants();
     sleepFor10Mins(); // 60 mins
     waitToSend = sendToServer(moistureReadings, sizeof(moistureReadings));
     while (waitToSend)
     {
         os_runloop_once();
     }
+    hourCounter++;
 }
 
