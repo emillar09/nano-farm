@@ -14,19 +14,34 @@ static const u1_t APPSKEY[16] = { 0x3A, 0x98, 0x2D, 0x70, 0xED, 0xB3, 0xDE, 0x24
 static const u4_t DEVADDR = 0x26011A21;
 
 #define MOISTURE_SENSOR_PIN A0
+#define WATER_LEVEL_SENSOR_PIN A1
+#define FEED_LEVEL_SENSOR_PIN A2
 #define WATER_PUMP_PIN 4
 #define FEED_PUMP_PIN 5
 
-#define AIR_VALUE 590
-#define WATER_VALUE 74
+#define AIR_VALUE 575
+#define WATER_VALUE 93
 
-#define WATERING_THRESHOLD 50 // Just guessed this to have a test
-#define WATER_TIME 2000
+#define WATER_FLAG_MASK 0x80
+#define FEED_FLAG_MASK 0x40
+#define WATER_REFILL_FLAG_MASK 0x20
+#define FEED_REFILL_FLAG_MASK 0x10
+
+#define WATERING_THRESHOLD 400 // Just guessed this to have a test
+#define TANK_REFILL_THRESHOLD 400
+#define WATER_TIME 10000
 #define FEED_TIME 2000
 #define NUM_READINGS 3
 
 volatile bool waitToSend;
 int hourCounter;
+byte lastFlags = 0x00;
+
+struct Data
+{
+    int moistureReadings[NUM_READINGS];
+    byte flags;
+};
 
 // Pin mapping
 const lmic_pinmap lmic_pins = {
@@ -88,18 +103,52 @@ void setup()
     // Set data rate and transmit power for uplink (note: txpow seems to be ignored by the library)
     LMIC_setDrTxpow(DR_SF7,14);
 
+    Data tmpdata;
+    checkTankRefillRequired(WATER_LEVEL_SENSOR_PIN, &tmpdata);
+    checkTankRefillRequired(FEED_LEVEL_SENSOR_PIN, &tmpdata);
+    lastFlags = tmpdata.flags;
+
 }
 
-byte readFromMoistureSensor()
+int readFromMoistureSensor()
 {
-    int moistureReading = analogRead(MOISTURE_SENSOR_PIN);
+    int sensorReading = analogRead(MOISTURE_SENSOR_PIN);
     // map readings to percentage scale
-    byte val = map(moistureReading, WATER_VALUE, AIR_VALUE, 100, 0);
+    int moistureReading = (-0.2*sensorReading + 106) * 10;
 
-    return val;
+    return moistureReading;
 }
 
-void feedPlants()
+bool checkTankRefillRequired(int tankPin, Data *data)
+{
+    int sensorReading = analogRead(tankPin);
+    if (sensorReading > TANK_REFILL_THRESHOLD)
+    {
+        if (tankPin == WATER_LEVEL_SENSOR_PIN)
+        {
+            data->flags |= WATER_REFILL_FLAG_MASK;
+        }
+        else
+        {
+            data->flags |= FEED_REFILL_FLAG_MASK;
+        }
+        return true;
+    }
+    else
+    {
+        if (tankPin == WATER_LEVEL_SENSOR_PIN)
+        {
+            data->flags &= ~WATER_REFILL_FLAG_MASK;
+        }
+        else
+        {
+            data->flags &= ~FEED_REFILL_FLAG_MASK;
+        }
+        return false;
+    }
+}
+
+bool feedPlants(Data *data)
 {
     // Feed plants once a week
     if (hourCounter == 168) // 168 hours = 7 days
@@ -110,10 +159,13 @@ void feedPlants()
         Serial.println("Feed Pump off");
         digitalWrite(FEED_PUMP_PIN, HIGH);
         hourCounter = 0;
+        data->flags |= FEED_FLAG_MASK;
+        return true;
     }
+    return false;
 }
 
-void waterPlants(byte reading)
+bool waterPlants(int reading, Data *data)
 {
     if (reading <= WATERING_THRESHOLD)
     {
@@ -122,11 +174,15 @@ void waterPlants(byte reading)
         delay(WATER_TIME);
         Serial.println("Water Pump off");
         digitalWrite(WATER_PUMP_PIN, HIGH);
+        data->flags |= WATER_FLAG_MASK;
+        return true;
     }
+    return false;
 }
 
-bool sendToServer(byte * data, int dataLength)
+bool sendToServer(void * sensorData, int dataLength)
 {
+    Data * data = (Data *) sensorData;
     // Check if there is not a current TX/RX job running
     if (LMIC.opmode & OP_TXRXPEND) {
         Serial.println(F("OP_TXRXPEND, not sending"));
@@ -144,36 +200,55 @@ void sleepFor10Mins ()
 {
     for (int i=0; i<75; i++)
     {
-        LowPower.powerDown(SLEEP_8S, ADC_OFF, BOD_ON);
+        LowPower.powerDown(SLEEP_8S, ADC_OFF, BOD_OFF);
     }
 }
 
 void loop()
 {
-    byte moistureReadings[NUM_READINGS] = {};
+    struct Data data;
+    data.flags = lastFlags;
+    if (lastFlags & WATER_REFILL_FLAG_MASK == WATER_REFILL_FLAG_MASK)
+    {
+        checkTankRefillRequired(WATER_LEVEL_SENSOR_PIN, &data);
+    }
+    if(lastFlags & FEED_REFILL_FLAG_MASK == FEED_REFILL_FLAG_MASK )
+    {
+        checkTankRefillRequired(FEED_LEVEL_SENSOR_PIN, &data);
+    }
 
     sleepFor10Mins(); // 10 mins
-    moistureReadings[0] = readFromMoistureSensor();
+    data.moistureReadings[0] = readFromMoistureSensor();
     Serial.print("0 : ");
-    Serial.println(moistureReadings[0]);
+    Serial.println(data.moistureReadings[0]);
     sleepFor10Mins(); // 20 mins
-    moistureReadings[1] = readFromMoistureSensor();
+    data.moistureReadings[1] = readFromMoistureSensor();
     Serial.print("1 : ");
-    Serial.println(moistureReadings[1]);
+    Serial.println(data.moistureReadings[1]);
     sleepFor10Mins(); // 30 mins
-    waterPlants(moistureReadings[1]);
+    if (waterPlants(data.moistureReadings[1], &data))
+    {
+        checkTankRefillRequired(WATER_LEVEL_SENSOR_PIN, &data);
+    }
     sleepFor10Mins(); // 40 mins
-    moistureReadings[2] = readFromMoistureSensor();
+    data.moistureReadings[2] = readFromMoistureSensor();
     Serial.print("2 : ");
-    Serial.println(moistureReadings[2]);
+    Serial.println(data.moistureReadings[2]);
     sleepFor10Mins(); // 50 mins
-    feedPlants();
+    if (feedPlants(&data))
+    {
+        checkTankRefillRequired(FEED_LEVEL_SENSOR_PIN, &data);
+    }
     sleepFor10Mins(); // 60 mins
-    waitToSend = sendToServer(moistureReadings, sizeof(moistureReadings));
+    waitToSend = sendToServer(&data, sizeof(data));
     while (waitToSend)
     {
         os_runloop_once();
     }
     hourCounter++;
+    //RESET WATER FEED FLAGS
+    Serial.println(data.flags, HEX);
+    data.flags &= 0x30;
+    lastFlags = data.flags;
 }
 
